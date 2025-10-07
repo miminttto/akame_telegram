@@ -5,6 +5,8 @@ import datetime
 import time
 import logging
 import threading
+import json
+import os
 
 # Настройка логирования
 logging.basicConfig(
@@ -64,6 +66,322 @@ glav = types.InlineKeyboardMarkup()
 help_btn = types.InlineKeyboardButton("Помощь", callback_data='help')
 new_btn = types.InlineKeyboardButton("Новинка", callback_data='new')
 glav.add(help_btn, new_btn)
+
+# ЭКОНОМИЧЕСКАЯ СИСТЕМА
+class EconomySystem:
+    def __init__(self, data_file="economy_data.json"):
+        self.data_file = data_file
+        self.data = self.load_data()
+        self.logger = logging.getLogger('AkameBot.Economy')
+
+        # Настройки экономики
+        self.settings = {
+            'start_balance': 1000,
+            'daily_reward': {
+                'min': 50,
+                'max': 200,
+                'streak_bonus': 50
+            },
+            'work_reward': {
+                'min': 20,
+                'max': 100
+            },
+            'crime_reward': {
+                'min': 10,
+                'max': 150,
+                'fail_chance': 0.3
+            },
+            'transfer_tax': 0.05,  # 5% налог на переводы
+            'cooldowns': {
+                'daily': 86400,  # 24 часа
+                'work': 3600,    # 1 час
+                'crime': 1800    # 30 минут
+            }
+        }
+
+    def load_data(self):
+        """Загружает данные экономики из файла"""
+        try:
+            if os.path.exists(self.data_file):
+                with open(self.data_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            print(f"Ошибка загрузки данных экономики: {e}")
+            return {}
+
+    def save_data(self):
+        """Сохраняет данные экономики в файл"""
+        try:
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения данных экономики: {e}")
+
+    def get_user_data(self, user_id):
+        """Получает данные пользователя, создает если нет"""
+        user_id = str(user_id)
+        if user_id not in self.data:
+            self.data[user_id] = {
+                'balance': self.settings['start_balance'],
+                'last_daily': 0,
+                'last_work': 0,
+                'last_crime': 0,
+                'daily_streak': 0,
+                'total_earned': 0,
+                'total_spent': 0,
+                'inventory': {}
+            }
+        return self.data[user_id]
+
+    def get_balance(self, user_id):
+        """Получает баланс пользователя"""
+        user_data = self.get_user_data(user_id)
+        return user_data['balance']
+
+    def add_money(self, user_id, amount, source="other"):
+        """Добавляет деньги пользователю"""
+        user_data = self.get_user_data(user_id)
+        user_data['balance'] += amount
+        if amount > 0:
+            user_data['total_earned'] += amount
+        self.save_data()
+
+        self.logger.info(f"Добавлено {amount} монет пользователю {user_id} (источник: {source})")
+        return user_data['balance']
+
+    def remove_money(self, user_id, amount, reason="other"):
+        """Убирает деньги у пользователя"""
+        user_data = self.get_user_data(user_id)
+        if user_data['balance'] >= amount:
+            user_data['balance'] -= amount
+            user_data['total_spent'] += amount
+            self.save_data()
+
+            self.logger.info(f"Списано {amount} монет у пользователя {user_id} (причина: {reason})")
+            return True
+        return False
+
+    def can_use_daily(self, user_id):
+        """Проверяет, можно ли получить ежедневную награду"""
+        user_data = self.get_user_data(user_id)
+        current_time = time.time()
+        last_daily = user_data['last_daily']
+
+        # Проверяем, прошло ли 24 часа
+        if current_time - last_daily >= self.settings['cooldowns']['daily']:
+            return True, 0
+
+        # Вычисляем оставшееся время
+        remaining = self.settings['cooldowns']['daily'] - (current_time - last_daily)
+        return False, remaining
+
+    def get_daily_reward(self, user_id):
+        """Выдает ежедневную награду"""
+        can_use, remaining = self.can_use_daily(user_id)
+        if not can_use:
+            return False, remaining, 0, 0
+
+        user_data = self.get_user_data(user_id)
+        current_time = time.time()
+
+        # Проверяем, не сбился ли стрик
+        if current_time - user_data['last_daily'] > self.settings['cooldowns']['daily'] * 2:
+            user_data['daily_streak'] = 0
+
+        # Увеличиваем стрик
+        user_data['daily_streak'] += 1
+
+        # Вычисляем награду
+        base_reward = random.randint(
+            self.settings['daily_reward']['min'],
+            self.settings['daily_reward']['max']
+        )
+
+        streak_bonus = self.settings['daily_reward']['streak_bonus'] * user_data['daily_streak']
+        total_reward = base_reward + streak_bonus
+
+        # Добавляем деньги
+        self.add_money(user_id, total_reward, "daily")
+        user_data['last_daily'] = current_time
+        self.save_data()
+
+        return True, 0, total_reward, user_data['daily_streak']
+
+    def can_work(self, user_id):
+        """Проверяет, можно ли работать"""
+        user_data = self.get_user_data(user_id)
+        current_time = time.time()
+
+        if current_time - user_data['last_work'] >= self.settings['cooldowns']['work']:
+            return True, 0
+
+        remaining = self.settings['cooldowns']['work'] - (current_time - user_data['last_work'])
+        return False, remaining
+
+    def work(self, user_id):
+        """Работа для получения денег"""
+        can_work, remaining = self.can_work(user_id)
+        if not can_work:
+            return False, remaining, 0
+
+        user_data = self.get_user_data(user_id)
+
+        # Вычисляем награду
+        reward = random.randint(
+            self.settings['work_reward']['min'],
+            self.settings['work_reward']['max']
+        )
+
+        # Добавляем деньги
+        self.add_money(user_id, reward, "work")
+        user_data['last_work'] = time.time()
+        self.save_data()
+
+        return True, 0, reward
+
+    def can_commit_crime(self, user_id):
+        """Проверяет, можно ли совершить преступление"""
+        user_data = self.get_user_data(user_id)
+        current_time = time.time()
+
+        if current_time - user_data['last_crime'] >= self.settings['cooldowns']['crime']:
+            return True, 0
+
+        remaining = self.settings['cooldowns']['crime'] - (current_time - user_data['last_crime'])
+        return False, remaining
+
+    def commit_crime(self, user_id):
+        """Совершение преступления (рискованно, но может принести много денег)"""
+        can_crime, remaining = self.can_commit_crime(user_id)
+        if not can_crime:
+            return False, remaining, 0, False
+
+        user_data = self.get_user_data(user_id)
+
+        # Шанс провала
+        if random.random() < self.settings['crime_reward']['fail_chance']:
+            # Провал - теряем деньги
+            penalty = random.randint(10, 50)
+            success = self.remove_money(user_id, penalty, "crime_fail")
+
+            user_data['last_crime'] = time.time()
+            self.save_data()
+
+            return True, 0, -penalty, False
+
+        # Успех - получаем деньги
+        reward = random.randint(
+            self.settings['crime_reward']['min'],
+            self.settings['crime_reward']['max']
+        )
+
+        self.add_money(user_id, reward, "crime")
+        user_data['last_crime'] = time.time()
+        self.save_data()
+
+        return True, 0, reward, True
+
+    def transfer_money(self, from_user_id, to_user_id, amount):
+        """Перевод денег между пользователями"""
+        # Проверяем, достаточно ли денег
+        if not self.remove_money(from_user_id, amount, "transfer_out"):
+            return False, "Недостаточно средств"
+
+        # Вычисляем сумму с учетом налога
+        tax = int(amount * self.settings['transfer_tax'])
+        net_amount = amount - tax
+
+        # Добавляем деньги получателю
+        self.add_money(to_user_id, net_amount, "transfer_in")
+
+        self.logger.info(f"Перевод: {from_user_id} -> {to_user_id} | Сумма: {amount} | Налог: {tax} | Чистая: {net_amount}")
+        return True, f"Успешный перевод! Налог: {tax} монет"
+
+    def get_leaderboard(self, limit=10):
+        """Получает таблицу лидеров по балансу"""
+        users = []
+        for user_id, data in self.data.items():
+            users.append({
+                'user_id': user_id,
+                'balance': data['balance'],
+                'total_earned': data['total_earned']
+            })
+
+        # Сортируем по балансу
+        users.sort(key=lambda x: x['balance'], reverse=True)
+        return users[:limit]
+
+    def format_time(self, seconds):
+        """Форматирует время в читаемый вид"""
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+
+        if hours > 0:
+            return f"{hours}ч {minutes}м {seconds}с"
+        elif minutes > 0:
+            return f"{minutes}м {seconds}с"
+        else:
+            return f"{seconds}с"
+
+# Создаем глобальный экземпляр экономики
+economy = EconomySystem()
+
+# Список работ для команды work
+WORK_JOBS = [
+    "поработал(а) программистом",
+    "подработал(а) в кафе",
+    "выполнил(а) заказ на фрилансе",
+    "поработал(а) курьером",
+    "сделал(а) дизайн сайта",
+    "написал(а) статью для блога",
+    "провел(а) онлайн-консультацию",
+    "создал(а) логотип для компании"
+]
+
+# Список преступлений для команды crime
+CRIME_ACTIVITIES = [
+    "ограбил(а) банк",
+    "взломал(а) систему безопасности",
+    "украл(а) драгоценности",
+    "провел(а) кибератаку",
+    "подделал(а) документы",
+    "проник(ла) в секретную базу данных"
+]
+
+# Функции экономики
+def format_time(seconds):
+    """Форматирует время в читаемый вид"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    seconds = int(seconds % 60)
+
+    if hours > 0:
+        return f"{hours}ч {minutes}м {seconds}с"
+    elif minutes > 0:
+        return f"{minutes}м {seconds}с"
+    else:
+        return f"{seconds}с"
+
+def get_user_id_by_username(chat_id, username):
+    """Получает ID пользователя по юзернейму в чате"""
+    try:
+        # Получаем всех администраторов чата
+        admins = bot.get_chat_administrators(chat_id)
+
+        # Ищем среди администраторов
+        for admin in admins:
+            if admin.user.username and admin.user.username.lower() == username.lower():
+                return admin.user.id
+
+        # Если не нашли среди администраторов, пытаемся найти среди участников
+        logger.warning(f"Пользователь @{username} не найден среди администраторов. Поиск по юзернейму может быть ограничен.")
+        return None
+
+    except Exception as e:
+        logger.error(f"Ошибка при поиске пользователя @{username}: {e}")
+        return None
 
 # Функция проверки прав
 def is_moderator(user_id):
@@ -160,27 +478,6 @@ def send_animation_with_auto_delete(chat_id, animation, caption=None, delay=15):
         logger.error(f"Ошибка при отправке анимации: {e}")
         return None
 
-def get_user_id_by_username(chat_id, username):
-    """Получает ID пользователя по юзернейму в чате"""
-    try:
-        # Получаем всех администраторов чата
-        admins = bot.get_chat_administrators(chat_id)
-
-        # Ищем среди администраторов
-        for admin in admins:
-            if admin.user.username and admin.user.username.lower() == username.lower():
-                return admin.user.id
-
-        # Если не нашли среди администраторов, пытаемся найти среди участников
-        # ВНИМАНИЕ: Этот метод может не работать в больших чатах
-        # В реальном боте лучше использовать другие методы поиска
-        logger.warning(f"Пользователь @{username} не найден среди администраторов. Поиск по юзернейму может быть ограничен.")
-        return None
-
-    except Exception as e:
-        logger.error(f"Ошибка при поиске пользователя @{username}: {e}")
-        return None
-
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     if call.data == 'help':
@@ -189,6 +486,16 @@ def callback_handler(call):
         '''🎮 *СПРАВКА ПО КОМАНДАМ* 🎮
 
 Здесь вы можете узнать все доступные команды и их использование!
+
+╔═══════════════════════╗
+║              💰ЭКОНОМИКА              ║
+╚═══════════════════════╝
+• 💵 `a:balance` - проверить баланс
+• 🎁 `a:daily` - ежедневная награда
+• 💼 `a:work` - работать (раз в час)
+• 🦹 `a:crime` - рискованное дело (раз в 30 мин)
+• 📤 `a:transfer @юзер сумма` - перевод денег
+• 🏆 `a:top` - таблица лидеров
 
 ╔═══════════════════════╗
 ║              🎯КОМАНДЫ БОТА              ║
@@ -240,6 +547,14 @@ a:myr
 !unmute (через ответ)
 a:staffcmd
 
+💰 *НОВАЯ ЭКОНОМИЧЕСКАЯ СИСТЕМА:*
+• a:balance - проверить баланс
+• a:daily - ежедневная награда
+• a:work - работать
+• a:crime - рискованное дело
+• a:transfer - перевод денег
+• a:top - таблица лидеров
+
 🎬 Глобальные обновления:
 
 • Добавлена система логирования
@@ -251,6 +566,250 @@ a:staffcmd
 def start(message):
     logger.info(f"Команда: /start | Пользователь: {message.from_user.username} (ID: {message.from_user.id}) | Чат: {message.chat.id}")
     bot.send_message(message.chat.id, 'Привет я Акаме.\nЯ создана чтобы добавить развлечения в телеграмм группу или сервер развлечения!\n\n(дᴀнный боᴛ нᴀходиᴛьᴄя ʙ ᴩᴀзᴩᴀбоᴛᴋᴇ, ᴨо϶ᴛоʍу ʍоᴦуᴛ быᴛь бᴀᴦи и чᴀᴄᴛо ʙыᴋᴧючᴇн.)', reply_markup=glav)
+
+# ЭКОНОМИЧЕСКИЕ КОМАНДЫ
+
+# Команда баланса
+@bot.message_handler(func=lambda message: message.text.startswith('a:balance'))
+def balance_cmd(message):
+    try:
+        user_id = message.from_user.id
+        balance = economy.get_balance(user_id)
+        user_data = economy.get_user_data(user_id)
+
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+
+        response = f"""💰 *БАЛАНС ПОЛЬЗОВАТЕЛЯ*
+
+👤 *Пользователь:* {username}
+💵 *Баланс:* `{balance}` монет
+📈 *Всего заработано:* `{user_data['total_earned']}` монет
+📉 *Всего потрачено:* `{user_data['total_spent']}` монет
+🔥 *Дневной стрик:* `{user_data['daily_streak']}` дней
+
+💡 *Доступные команды:*
+`a:daily` - ежедневная награда
+`a:work` - работа
+`a:crime` - рискованное дело
+`a:transfer @юзер сумма` - перевод
+`a:top` - таблица лидеров"""
+
+        bot.reply_to(message, response, parse_mode='Markdown')
+        logger.info(f"Баланс | Пользователь: {message.from_user.username} (ID: {user_id}) | Баланс: {balance}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:balance: {e}")
+        bot.reply_to(message, "❌ Ошибка при получении баланса")
+
+# Команда ежедневной награды
+@bot.message_handler(func=lambda message: message.text.startswith('a:daily'))
+def daily_cmd(message):
+    try:
+        user_id = message.from_user.id
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+
+        success, remaining, reward, streak = economy.get_daily_reward(user_id)
+
+        if success:
+            response = f"""🎁 *ЕЖЕДНЕВНАЯ НАГРАДА*
+
+👤 *Пользователь:* {username}
+💰 *Награда:* `{reward}` монет
+🔥 *Стрик:* `{streak}` дней подряд
+💵 *Новый баланс:* `{economy.get_balance(user_id)}` монет
+
+*Возвращайся завтра за новой наградой!* 🎉"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+            logger.info(f"Daily | Пользователь: {message.from_user.username} (ID: {user_id}) | Награда: {reward} | Стрик: {streak}")
+        else:
+            wait_time = economy.format_time(remaining)
+            response = f"""⏰ *ЕЩЕ РАНО!*
+
+Ты уже получал(а) ежедневную награду сегодня.
+Приходи через *{wait_time}*"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:daily: {e}")
+        bot.reply_to(message, "❌ Ошибка при получении награды")
+
+# Команда работы
+@bot.message_handler(func=lambda message: message.text.startswith('a:work'))
+def work_cmd(message):
+    try:
+        user_id = message.from_user.id
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+
+        success, remaining, reward = economy.work(user_id)
+
+        if success:
+            job = random.choice(WORK_JOBS)
+            response = f"""💼 *РАБОТА*
+
+👤 *Пользователь:* {username}
+🔧 *Деятельность:* {job}
+💰 *Заработок:* `{reward}` монет
+💵 *Новый баланс:* `{economy.get_balance(user_id)}` монет
+
+*Можно работать again через 1 час*"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+            logger.info(f"Work | Пользователь: {message.from_user.username} (ID: {user_id}) | Заработок: {reward}")
+        else:
+            wait_time = economy.format_time(remaining)
+            response = f"""⏰ *ОТДЫХАЙ!*
+
+Ты уже достаточно поработал(а).
+Отдохни еще *{wait_time}*"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:work: {e}")
+        bot.reply_to(message, "❌ Ошибка при выполнении работы")
+
+# Команда преступления
+@bot.message_handler(func=lambda message: message.text.startswith('a:crime'))
+def crime_cmd(message):
+    try:
+        user_id = message.from_user.id
+        username = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+
+        success, remaining, reward, crime_success = economy.commit_crime(user_id)
+
+        if success:
+            activity = random.choice(CRIME_ACTIVITIES)
+
+            if crime_success:
+                response = f"""🦹‍♂️ *УСПЕШНОЕ ПРЕСТУПЛЕНИЕ*
+
+👤 *Пользователь:* {username}
+🔫 *Деятельность:* {activity}
+💰 *Добыча:* `{reward}` монет
+💵 *Новый баланс:* `{economy.get_balance(user_id)}` монет
+
+*Повезло! Но не злоупотребляй удачей* 😈"""
+
+                logger.info(f"Crime | Пользователь: {message.from_user.username} (ID: {user_id}) | Успех | Добыча: {reward}")
+            else:
+                response = f"""🚨 *ПРОВАЛ!*
+
+👤 *Пользователь:* {username}
+🔫 *Деятельность:* {activity}
+💸 *Потеря:* `{-reward}` монет
+💵 *Новый баланс:* `{economy.get_balance(user_id)}` монет
+
+*Тебя поймали! Будь осторожнее в следующий раз* 👮"""
+
+                logger.info(f"Crime | Пользователь: {message.from_user.username} (ID: {user_id}) | Провал | Потеря: {-reward}")
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+        else:
+            wait_time = economy.format_time(remaining)
+            response = f"""🚔 *СЛИШКОМ ЖАРКО!*
+
+Тебя сейчас ищут полиция!
+Ложись на дно еще *{wait_time}*"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:crime: {e}")
+        bot.reply_to(message, "❌ Ошибка при выполнении преступления")
+
+# Команда перевода
+@bot.message_handler(func=lambda message: message.text.startswith('a:transfer'))
+def transfer_cmd(message):
+    try:
+        user_id = message.from_user.id
+        parts = message.text.split()
+
+        if len(parts) < 3:
+            bot.reply_to(message, """❌ *Неправильный формат!*
+
+Используй: `a:transfer @юзернейм сумма`
+
+*Пример:*
+`a:transfer @username 100`""", parse_mode='Markdown')
+            return
+
+        target_username = parts[1]
+        if not target_username.startswith('@'):
+            bot.reply_to(message, "❌ Укажи юзернейм получателя с @")
+            return
+
+        try:
+            amount = int(parts[2])
+            if amount <= 0:
+                bot.reply_to(message, "❌ Сумма должна быть положительной")
+                return
+        except ValueError:
+            bot.reply_to(message, "❌ Неправильная сумма")
+            return
+
+        target_user_id = get_user_id_by_username(message.chat.id, target_username[1:])
+
+        if not target_user_id:
+            bot.reply_to(message, f"❌ Пользователь {target_username} не найден в этом чате")
+            return
+
+        if target_user_id == user_id:
+            bot.reply_to(message, "❌ Нельзя переводить самому себе")
+            return
+
+        success, message_text = economy.transfer_money(user_id, target_user_id, amount)
+
+        if success:
+            from_user = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+            response = f"""✅ *ПЕРЕВОД ВЫПОЛНЕН*
+
+👤 *От:* {from_user}
+🎯 *Кому:* {target_username}
+💸 *Сумма:* `{amount}` монет
+💵 *Новый баланс:* `{economy.get_balance(user_id)}` монет
+
+*{message_text}*"""
+
+            bot.reply_to(message, response, parse_mode='Markdown')
+            logger.info(f"Transfer | От: {user_id} | Кому: {target_user_id} | Сумма: {amount}")
+        else:
+            bot.reply_to(message, f"❌ {message_text}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:transfer: {e}")
+        bot.reply_to(message, "❌ Ошибка при переводе")
+
+# Команда топа
+@bot.message_handler(func=lambda message: message.text.startswith('a:top'))
+def top_cmd(message):
+    try:
+        leaderboard = economy.get_leaderboard(10)
+
+        if not leaderboard:
+            bot.reply_to(message, "📊 *ТОП ИГРОКОВ*\n\nПока нет данных о игроках")
+            return
+
+        response = "🏆 *ТОП 10 БОГАЧЕЙ* 🏆\n\n"
+
+        for i, user in enumerate(leaderboard, 1):
+            medal = ""
+            if i == 1: medal = "🥇"
+            elif i == 2: medal = "🥈" 
+            elif i == 3: medal = "🥉"
+            else: medal = f"{i}."
+
+            response += f"{medal} `{user['user_id']}` - {user['balance']} монет\n"
+
+        response += f"\n💵 *Твой баланс:* `{economy.get_balance(message.from_user.id)}` монет"
+
+        bot.reply_to(message, response, parse_mode='Markdown')
+        logger.info(f"Top | Запрошено пользователем: {message.from_user.username} (ID: {message.from_user.id})")
+
+    except Exception as e:
+        logger.error(f"Ошибка в a:top: {e}")
+        bot.reply_to(message, "❌ Ошибка при получении топа")
 
 # РП КОМАНДЫ (без автоудаления)
 # kill команда
@@ -769,6 +1328,16 @@ def help_cmd(message):
 Здесь вы можете узнать все доступные команды и их использование!
 
 ╔═══════════════════════╗
+║              💰ЭКОНОМИКА              ║
+╚═══════════════════════╝
+• 💵 `a:balance` - проверить баланс
+• 🎁 `a:daily` - ежедневная награда
+• 💼 `a:work` - работать (раз в час)
+• 🦹 `a:crime` - рискованное дело (раз в 30 мин)
+• 📤 `a:transfer @юзер сумма` - перевод денег
+• 🏆 `a:top` - таблица лидеров
+
+╔═══════════════════════╗
 ║              🎯КОМАНДЫ БОТА              ║
 ╚═══════════════════════╝
 • 🔫 `a:kill [юзернейм]` — устранить пользователя
@@ -819,6 +1388,14 @@ a:myr
 !unmute (через ответ)
 a:staffcmd
 
+💰 *НОВАЯ ЭКОНОМИЧЕСКАЯ СИСТЕМА:*
+• a:balance - проверить баланс
+• a:daily - ежедневная награда
+• a:work - работать
+• a:crime - рискованное дело
+• a:transfer - перевод денег
+• a:top - таблица лидеров
+
 🎬 Глобальные обновления:
 
 • Добавлена система логирования
@@ -836,8 +1413,9 @@ logger.info("=" * 50)
 logger.info("Бот Акаме запущен!")
 logger.info(f"Создатель: {CREATOR_ID}")
 logger.info(f"Модераторы: {MODERATOR_IDS}")
-logger.info(f"Всего команд: 12")
+logger.info(f"Всего команд: 18")
 logger.info("Доступные команды:")
+logger.info("Экономика: a:balance, a:daily, a:work, a:crime, a:transfer, a:top")
 logger.info("РП команды: a:kill, a:hug, a:kiss, a:myr, a:slap")
 logger.info("Общие команды: a:help, a:new, /start")
 logger.info("Модерские команды: !mute (@юзернейм/ответ), !unmute, a:staffcmd")
@@ -848,5 +1426,6 @@ print("Бот запущен!")
 print(f"Создатель: {CREATOR_ID}")
 print(f"Модераторы: {MODERATOR_IDS}")
 print("Логи сохраняются в файл: bot.log")
+print("Экономические данные сохраняются в: economy_data.json")
 print("Автоудаление сообщений включено (15 секунд для всех команд кроме РП)")
 bot.polling(none_stop=True)
