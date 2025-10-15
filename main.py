@@ -19,7 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger('AkameBot')
 
-bot = telebot.TeleBot('8353863888:AAF255dYhhiihQR_-A_x9_rSJJZcJaTJhHs')
+bot = telebot.TeleBot('8353863888:AAGVokrEq2aYpvRIkR1xeOV_MGXfKJgxJdY')
 
 # RP действия
 slap_actions = ["шлёпнул(а)", "дал(а) подзатыльник", "отхлестал(а)"]
